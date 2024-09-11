@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "ruby_lsp/ruby_lsp_rails/runner_client"
+require "ruby_lsp_rails/runner_client"
 
 module RubyLsp
   module Rails

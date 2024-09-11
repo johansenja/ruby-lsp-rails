@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "json"
+require_relative "server/extension"
 
 # NOTE: We should avoid printing to stderr since it causes problems. We never read the standard error pipe from the
 # client, so it will become full and eventually hang or crash. Instead, return a response with an `error` key.
@@ -16,6 +17,9 @@ module RubyLsp
         $stdout.sync = true
         $stdin.binmode
         $stdout.binmode
+
+        load_extensions
+
         @running = true
       end
 
@@ -23,6 +27,13 @@ module RubyLsp
         # Load routes if they haven't been loaded yet (see https://github.com/rails/rails/pull/51614).
         routes_reloader = ::Rails.application.routes_reloader
         routes_reloader.execute_unless_loaded if routes_reloader&.respond_to?(:execute_unless_loaded)
+
+        Server.start_callbacks&.each do |cb|
+          instance_exec(&cb)
+        rescue => e
+          msg = { error: "Encountered error running startup callback #{cb} (error: #{e}. Message: #{e.message})" }.to_json
+          $stdout.write("Content-Length: #{msg.length}\r\n\r\n#{msg}")
+        end
 
         initialize_result = { result: { message: "ok", root: ::Rails.root.to_s } }.to_json
         $stdout.write("Content-Length: #{initialize_result.length}\r\n\r\n#{initialize_result}")
@@ -43,6 +54,11 @@ module RubyLsp
       def execute(request, params)
         case request
         when "shutdown"
+          Server.shutdown_callbacks&.each do |cb|
+            instance_exec(&cb)
+          rescue
+            # What to do?
+          end
           @running = false
           VOID
         when "model"
@@ -51,13 +67,26 @@ module RubyLsp
           resolve_association_target(params)
         when "reload"
           ::Rails.application.reloader.reload!
+
+          Server.reload_callbacks&.each do |cb|
+            instance_exec(&cb)
+          rescue
+            # what to do?
+          end
+
           VOID
         when "route_location"
           route_location(params.fetch(:name))
         when "route_info"
           resolve_route_info(params)
         else
-          VOID
+          extension_capability = Server.extension_capabilities[request.to_sym]
+          if extension_capability
+            result = instance_exec(params, &extension_capability)
+            { result: result }
+          else
+            VOID
+          end
         end
       rescue => e
         { error: e.full_message(highlight: false) }
@@ -176,8 +205,16 @@ module RubyLsp
           !const.abstract_class?
         )
       end
+
+      def load_extensions
+        Gem.find_files("ruby_lsp/rails/**/server_extension.rb").each do |ext|
+          full_path = File.expand_path(ext)
+          require full_path
+        rescue => e
+          msg = { error: "#{e} while loading extension #{ext}" }.to_json
+          $stdout.write("Content-Length: #{msg.length}\r\n\r\n#{msg}")
+        end
+      end
     end
   end
 end
-
-RubyLsp::Rails::Server.new.start if ARGV.first == "start"

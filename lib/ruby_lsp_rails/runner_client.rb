@@ -3,6 +3,7 @@
 
 require "json"
 require "open3"
+require "sorbet-runtime"
 
 module RubyLsp
   module Rails
@@ -11,20 +12,33 @@ module RubyLsp
         extend T::Sig
 
         sig { returns(RunnerClient) }
+        def instance
+          return NullClient.new unless @instance
+
+          @instance
+        end
+
+        sig { returns(RunnerClient) }
         def create_client
           if File.exist?("bin/rails")
-            new
+            client = new
+            @instance = T.let(client, T.nilable(RunnerClient))
           else
             $stderr.puts(<<~MSG)
               Ruby LSP Rails failed to locate bin/rails in the current directory: #{Dir.pwd}"
             MSG
             $stderr.puts("Server dependent features will not be available")
-            NullClient.new
+            client = NullClient.new
+            @instance = client
           end
+
+          client
         rescue Errno::ENOENT, StandardError => e # rubocop:disable Lint/ShadowedException
           $stderr.puts("Ruby LSP Rails failed to initialize server: #{e.message}\n#{e.backtrace&.join("\n")}")
           $stderr.puts("Server dependent features will not be available")
-          NullClient.new
+          client = NullClient.new
+          @instance = client
+          client
         end
       end
 
@@ -56,7 +70,11 @@ module RubyLsp
         end
 
         stdin, stdout, stderr, wait_thread = Bundler.with_original_env do
-          Open3.popen3("bundle", "exec", "rails", "runner", "#{__dir__}/server.rb", "start")
+          Open3.popen3(
+            "bundle", "exec", "rails", "runner",
+            File.expand_path("#{__dir__}/../ruby_lsp/ruby_lsp_rails/boot_server.rb"),
+            "start",
+          )
         end
 
         @stdin = T.let(stdin, IO)
@@ -70,15 +88,19 @@ module RubyLsp
         @stderr.binmode
 
         $stderr.puts("Ruby LSP Rails booting server")
-        count = 0
 
+        count = 0
         begin
           count += 1
           initialize_response = T.must(read_response)
           @rails_root = T.let(initialize_response[:root], String)
-        rescue EmptyMessageError
-          $stderr.puts("Ruby LSP Rails is retrying initialize (#{count})")
-          retry if count < MAX_RETRIES
+        rescue EmptyMessageError, IncompleteMessageError
+          if count < MAX_RETRIES
+            $stderr.puts("Ruby LSP Rails is retrying initialize (#{count})")
+            retry
+          else
+            raise
+          end
         end
 
         $stderr.puts("Finished booting Ruby LSP Rails server")
@@ -92,8 +114,8 @@ module RubyLsp
             end
           end
         end
-      rescue Errno::EPIPE, IncompleteMessageError
-        raise InitializationError, @stderr.read
+      rescue Errno::EPIPE, IncompleteMessageError, EmptyMessageError => e
+        raise InitializationError, e.message
       end
 
       sig { params(name: String).returns(T.nilable(T::Hash[Symbol, T.untyped])) }
