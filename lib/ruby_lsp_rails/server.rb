@@ -80,9 +80,9 @@ module RubyLsp
         when "route_info"
           resolve_route_info(params)
         else
-          extension_capability = Server.extension_capabilities[request.to_sym]
-          if extension_capability
-            result = instance_exec(params, &extension_capability)
+          resource = Server.extension_resources[request.to_sym]
+          if resource
+            result = instance_exec(params, &resource)
             { result: result }
           else
             VOID
